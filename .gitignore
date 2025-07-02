@@ -57,5 +57,21 @@ coverage/
 *.bak
 *.tmp
 
-# Firebase
-backend/app/serviceAccountKey.json 
+# Firebase and secrets
+backend/app/serviceAccountKey.json
+backend/serviceAccountKey.json
+*.key.json
+*.secret*
+*.pem
+*.crt
+*.pfx
+*.p12
+
+# Ignore PDFs and other large files
+*.pdf
+
+# Ignore OS and editor swap files
+*~
+*.swp
+*.swo
+*.tmp 
