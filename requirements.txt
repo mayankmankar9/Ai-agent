@@ -1,0 +1,14 @@
+# ==== Backend (FastAPI + LangChain + Firebase) ====
+fastapi
+uvicorn[standard]
+firebase-admin
+langchain
+langchain-core
+langchain-openai
+langchain-community
+openai
+tiktoken
+pydantic
+requests
+python-multipart
+python-dotenv
