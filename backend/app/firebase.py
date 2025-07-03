@@ -4,7 +4,7 @@ from datetime import datetime
 
 # ✅ Initialize Firebase once
 if not firebase_admin._apps:
-    cred = credentials.Certificate("serviceAccountKey.json")  # Adjust if needed
+    cred = credentials.Certificate("serviceAccountKey.json")# Adjust if needed
     firebase_admin.initialize_app(cred)
 
 # 🔹 Get complete user profile
