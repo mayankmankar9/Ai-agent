@@ -1,37 +1,55 @@
-import requests
 from langchain.tools import StructuredTool
 from pydantic import BaseModel
+from langchain_openai import ChatOpenAI
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+openai_api_key = os.getenv("OPENAI_API_KEY")
+if not openai_api_key:
+    raise ValueError("OPENAI_API_KEY not found in environment.")
 
 class CalorieInput(BaseModel):
     food: str
 
+llm = ChatOpenAI(model="gpt-3.5-turbo", openai_api_key=openai_api_key)
+
 def estimate_calorie(food: str) -> str:
-    headers = {
-        "x-app-id": "a8fb31d6",        # 🔁 Replace with your real app ID
-        "x-app-key": "36c96c77ec3226683518e485f9c3a9c3",      # 🔁 Replace with your real app key
-        "Content-Type": "application/json"
-    }
-    url = "https://trackapi.nutritionix.com/v2/natural/nutrients"
+    prompt = f"""
+You are a nutrition assistant. Estimate the nutrition values for the given food item using standard nutritional knowledge.
 
-    # 🔍 Clean food description to avoid vague GPT responses
-    cleaned_food = food.split("→")[0].strip("- ").strip()
+For: "{food}"
+Provide values **per 100g** or **1 standard serving**, whichever makes more sense.
 
-    response = requests.post(url, headers=headers, json={"query": cleaned_food})
-    if response.status_code != 200 or not response.json().get("foods"):
-        return "Not found"
+Respond in this format (no extra commentary):
+Calories: <value>
+Protein: <value>g
+Carbs: <value>g
+Fat: <value>g
 
-    result = response.json()["foods"][0]
-    return (
-        f"**{result['food_name'].title()}**\n"
-        f"Calories: {result['nf_calories']}\n"
-        f"Protein: {result['nf_protein']}\n"
-        f"Carbs: {result['nf_total_carbohydrate']}\n"
-        f"Fat: {result['nf_total_fat']}"
-    )
+Examples:
+Calories: 155
+Protein: 13g
+Carbs: 0g
+Fat: 11g
+
+Now estimate for:
+{food}
+""".strip()
+
+    response = llm.invoke(prompt).content.strip()
+    lines = response.split("\n")
+
+    # Ensure proper formatting (fallback on failure)
+    if not any("Calories" in line for line in lines):
+        return f"Could not estimate nutrition for **{food.title()}**."
+
+    return f"**{food.title()}**\n" + "\n".join(lines)
 
 calorie_tool = StructuredTool.from_function(
     func=estimate_calorie,
     name="CalorieEstimatorTool",
-    description="Returns nutritional data (calories, protein, carbs, fat) for any food item.",
+    description="Estimates calories, protein, carbs, and fat per 100g or 1 serving for any food using GPT.",
     args_schema=CalorieInput
 )

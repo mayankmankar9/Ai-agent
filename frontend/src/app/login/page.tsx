@@ -3,6 +3,8 @@ import React, { useState } from 'react';
 import { auth } from '../../lib/firebase';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
 import { useRouter } from 'next/navigation';
+import { doc, getDoc } from "firebase/firestore";
+import { db } from "../../lib/firebase";
 
 export default function LoginPage() {
   const [isLogin, setIsLogin] = useState(true);
@@ -15,12 +17,20 @@ export default function LoginPage() {
     e.preventDefault();
     setError('');
     try {
+      let userCredential;
       if (isLogin) {
-        await signInWithEmailAndPassword(auth, email, password);
+        userCredential = await signInWithEmailAndPassword(auth, email, password);
       } else {
-        await createUserWithEmailAndPassword(auth, email, password);
+        userCredential = await createUserWithEmailAndPassword(auth, email, password);
       }
-      router.push('/dashboard');
+      const user = userCredential.user;
+      const ref = doc(db, "users", user.uid);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) {
+        router.push("/onboarding");
+      } else {
+        router.push("/dashboard");
+      }
     } catch (err: any) {
       setError(err.message);
     }
@@ -65,4 +75,5 @@ export default function LoginPage() {
         </p>
       </form>
     </div>
-  );}
+  );
+}

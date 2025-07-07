@@ -1,257 +1,206 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { auth } from "@/lib/firebase";
+import React, { useEffect, useState } from "react";
+import { useAuth } from "../../context/AuthContext";
 import axios from "axios";
 import { useRouter } from "next/navigation";
-import {
-  doc,
-  getDoc,
-  collection,
-  getDocs,
-  orderBy,
-  query,
-  addDoc,
-  serverTimestamp,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
-import { signOut } from "firebase/auth";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
 
-type Plan = {
-  id: string;
-  week: string;
-  timestamp?: any;
-  response?: string;
-};
+interface WeekPlan {
+  week_number: number;
+  response: string;
+}
 
-type Profile = {
-  name?: string;
-  goal?: string;
-  diet_type?: string;
-  dislikes?: string;
-  height_cm?: number;
-  weight_kg?: number;
-  target_weight?: number;
-  tenure_months?: number;
-};
+interface MonthPlan {
+  month: number;
+  weeks: WeekPlan[];
+}
 
 export default function DashboardPage() {
+  const { user, loading, logout } = useAuth();
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [plans, setPlans] = useState<MonthPlan[]>([]);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedMonth, setSelectedMonth] = useState<number | null>(null);
+  const [selectedWeek, setSelectedWeek] = useState<number | null>(null);
   const router = useRouter();
-  const [loading, setLoading] = useState(false);
-  const [response, setResponse] = useState("");
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [planHistory, setPlanHistory] = useState<Plan[]>([]);
-  const [selectedWeek, setSelectedWeek] = useState<Plan | null>(null);
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchProfile = async () => {
-      const user = auth.currentUser;
-      if (!user) return router.push("/onboarding");
-      const ref = doc(db, "users", user.uid);
-      const snap = await getDoc(ref);
-      if (snap.exists()) {
-        setProfile(snap.data());
+    if (!user) return;
+
+    const fetchUserProfile = async () => {
+      try {
+        const token = await user.getIdToken();
+        const res = await axios.get(`http://localhost:8000/user/${user.uid}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        setUserProfile(res.data);
+      } catch (err) {
+        console.error("Failed to fetch user profile:", err);
+        setError("Failed to fetch user profile. Please try again.");
       }
     };
 
     const fetchPlans = async () => {
-      const user = auth.currentUser;
-      if (!user) return;
-      const plansRef = collection(db, "users", user.uid, "plans");
-      const q = query(plansRef, orderBy("timestamp", "desc"));
-      const snap = await getDocs(q);
-      const plans = snap.docs.map((doc, index) => ({
-        id: doc.id,
-        week: `Week ${snap.docs.length - index}`,
-        ...doc.data()
-      }));
-      setPlanHistory(plans);
+      try {
+        const token = await user.getIdToken();
+        const res = await axios.get(`http://localhost:8000/plans/${user.uid}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        const flatPlans = res.data.plans;
+        const groupedByMonth = groupPlansByMonth(flatPlans);
+        setPlans(groupedByMonth);
+      } catch (err) {
+        console.error("Failed to fetch saved plans:", err);
+        setError("Could not load previous plans.");
+      }
     };
 
-    fetchProfile();
+    fetchUserProfile();
     fetchPlans();
-  }, []);
+  }, [user]);
 
-  const handleGenerate = async () => {
-    const user = auth.currentUser;
-    if (!user) return;
-    setLoading(true);
+  const groupPlansByMonth = (plans: any[]): MonthPlan[] => {
+    const result: MonthPlan[] = [];
+    const totalWeeks = plans.length;
+    const totalMonths = Math.ceil(totalWeeks / 4);
+
+    for (let m = 0; m < totalMonths; m++) {
+      const monthWeeks = plans
+        .filter(w => w.week_number >= m * 4 + 1 && w.week_number <= (m + 1) * 4)
+        .sort((a, b) => a.week_number - b.week_number);
+      if (monthWeeks.length > 0) {
+        result.push({ month: m + 1, weeks: monthWeeks });
+      }
+    }
+
+    return result;
+  };
+
+  const handleGeneratePlan = async () => {
+    if (!user || !userProfile) return;
+    setGenerating(true);
+    setError(null);
     try {
-      const idToken = await user.getIdToken();
-      const plansRef = collection(db, "users", user.uid, "plans");
-      const existingPlans = await getDocs(plansRef);
-      const existingCount = existingPlans.size;
-      let newPlans: Plan[] = [];
+      const token = await user.getIdToken();
+      const currentWeek = plans.reduce((acc, month) => acc + month.weeks.length, 0) + 1;
+      const query = `Generate my meal plan for weeks ${currentWeek}-${currentWeek + 3} based on my goal to ${userProfile.goal} from weight ${userProfile.weight_kg} to ${userProfile.target_weight} over ${userProfile.tenure_months} months`;
 
-      for (let i = 1; i <= 4; i++) {
-        const weekNumber = existingCount + i;
-        const res = await axios.post(
-          "http://localhost:8000/ask",
-          { query: `Generate meal plan for week ${weekNumber}.` },
-          { headers: { Authorization: `Bearer ${idToken}` } }
-        );
-        const planData = {
-          response: res.data.response,
-          timestamp: serverTimestamp(),
-          week: `Week ${weekNumber}`
-        };
-        await addDoc(plansRef, planData);
-        newPlans.push({
-          id: `new-${weekNumber}-${Date.now()}`,
-          week: `Week ${weekNumber}`,
-          response: res.data.response,
-          // timestamp will be updated on reload
-        });
+      const res = await axios.post(
+        "http://localhost:8000/agent/query",
+        { user_id: user.uid, query },
+        { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }
+      );
+
+      const responseText = res.data.response || "No response received.";
+      const weekChunks = responseText
+        .split(/(?=Week\s+\d+)/i)
+        .filter(Boolean)
+        .map((chunk: string, i: number) => ({ week_number: currentWeek + i, response: chunk.trim() }));
+
+      const newMonth = {
+        month: Math.ceil(currentWeek / 4),
+        weeks: weekChunks,
+      };
+
+      const updatedPlans = [...plans];
+      const existingMonthIndex = updatedPlans.findIndex(m => m.month === newMonth.month);
+      if (existingMonthIndex !== -1) {
+        updatedPlans[existingMonthIndex].weeks.push(...newMonth.weeks);
+      } else {
+        updatedPlans.push(newMonth);
       }
 
-      // Reload plans from Firestore to get correct IDs and timestamps
-      const updatedSnap = await getDocs(query(plansRef, orderBy("timestamp", "desc")));
-      const updatedPlans = updatedSnap.docs.map((doc, index) => ({
-        id: doc.id,
-        week: `Week ${updatedSnap.docs.length - index}`,
-        ...doc.data()
-      }));
-      setPlanHistory(updatedPlans);
+      setPlans(updatedPlans);
     } catch (err) {
-      console.error("❌ Failed to generate:", err);
-      setResponse("Something went wrong.");
+      console.error(err);
+      setError("Failed to generate plan. Please try again.");
+    } finally {
+      setGenerating(false);
     }
-    setLoading(false);
   };
 
-  // Generate PDF as Blob URL for display and download
-  const generatePDFDataUrl = (week: string, plan: string) => {
-    const doc = new jsPDF();
-    doc.setFontSize(16);
-    doc.text(`Meal Plan - ${week}`, 14, 20);
-    // Split plan into days
-    const days = plan.split("\n\n📅 ").map((day, idx) => {
-      const lines = day.split("\n");
-      return {
-        day: lines[0],
-        meals: lines.slice(1).join("\n")
-      };
-    });
-    autoTable(doc, {
-      startY: 30,
-      head: [["Day", "Meals"]],
-      body: days.map(d => [d.day, d.meals]),
-      styles: { cellWidth: 'wrap' },
-      columnStyles: { 1: { cellWidth: 120 } },
-    });
-    return doc.output('dataurlstring');
-  };
-
-  // Download PDF for the selected week
-  const downloadPDF = (week: string, plan: string) => {
-    const doc = new jsPDF();
-    doc.setFontSize(16);
-    doc.text(`Meal Plan - ${week}`, 14, 20);
-    const days = plan.split("\n\n📅 ").map((day, idx) => {
-      const lines = day.split("\n");
-      return {
-        day: lines[0],
-        meals: lines.slice(1).join("\n")
-      };
-    });
-    autoTable(doc, {
-      startY: 30,
-      head: [["Day", "Meals"]],
-      body: days.map(d => [d.day, d.meals]),
-      styles: { cellWidth: 'wrap' },
-      columnStyles: { 1: { cellWidth: 120 } },
-    });
-    doc.save(`${week.replace(" ", "_")}_plan.pdf`);
-  };
-
-  return (
-    <div className="p-6 max-w-3xl mx-auto space-y-6">
-      <div className="flex justify-between items-center mb-4">
+  if (loading) return <div className="flex items-center justify-center h-screen text-xl">Loading user...</div>;
+  if (!user) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen text-xl">
+        <div>Please sign in.</div>
         <button
-          onClick={() => router.push("/onboarding")}
-          className="text-sm px-3 py-1 bg-yellow-500 text-white rounded shadow"
+          className="mt-4 px-4 py-2 bg-blue-600 text-white rounded shadow hover:bg-blue-700"
+          onClick={() => router.push("/login")}
         >
-          ✏️ Edit Profile
-        </button>
-        <button
-          onClick={async () => {
-            await signOut(auth);
-            router.push("/login");
-          }}
-          className="text-sm px-3 py-1 bg-red-600 text-white rounded shadow"
-        >
-          🔒 Logout
+          Go to Login
         </button>
       </div>
+    );
+  }
 
-      <h1 className="text-2xl font-bold">Welcome to your Dashboard</h1>
-
-      {profile && (
-        <div className="p-4 rounded border shadow bg-white">
-          <h2 className="text-lg font-semibold mb-2">Profile Summary</h2>
-          <ul className="text-sm space-y-1">
-            <li>Name: {profile.name}</li>
-            <li>Goal: {profile.goal}</li>
-            <li>Diet Type: {profile.diet_type}</li>
-            <li>Dislikes: {profile.dislikes || "None"}</li>
-            <li>Height: {profile.height_cm} cm</li>
-            <li>Weight: {profile.weight_kg} kg</li>
-            <li>Target Weight: {profile.target_weight || "Not specified"}</li>
-            <li>Tenure: {profile.tenure_months} months</li>
-          </ul>
-        </div>
-      )}
-
-      <button
-        className="bg-blue-600 text-white px-4 py-2 rounded shadow"
-        onClick={handleGenerate}
-        disabled={loading}
-      >
-        {loading ? "Generating..." : "Generate Plan"}
-      </button>
-
-      {/* Week selection buttons after plans are generated */}
-      {planHistory.length > 0 && (
-        <div className="flex gap-2 mt-6">
-          {planHistory.slice(0, 4).map((plan: Plan, idx: number) => (
-            <button
-              key={plan.id}
-              className={`px-4 py-2 rounded shadow text-white font-semibold ${selectedWeek?.id === plan.id ? 'bg-blue-700' : 'bg-blue-500'}`}
-              onClick={() => {
-                setSelectedWeek(plan);
-                setPdfUrl(generatePDFDataUrl(plan.week, plan.response ?? ""));
-              }}
-            >
-              {`Week ${idx + 1}`}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* PDF display and download */}
-      {selectedWeek && pdfUrl && (
-        <div className="mt-6 border rounded shadow bg-white p-4">
-          <div className="flex justify-between items-center mb-2">
-            <h2 className="text-lg font-bold">{selectedWeek.week} Meal Plan (Preview)</h2>
-            <button
-              className="bg-green-600 text-white text-sm px-3 py-1 rounded shadow"
-              onClick={() => downloadPDF(selectedWeek.week, selectedWeek.response ?? "")}
-            >
-              ⬇️ Download PDF
-            </button>
+  return (
+    <main className="min-h-screen bg-gray-100 py-8 px-4 flex flex-col items-center">
+      <div className="w-full max-w-4xl">
+        {userProfile && (
+          <div className="bg-white rounded-xl shadow p-6 mb-6 border border-gray-200">
+            <h2 className="text-2xl font-bold mb-4 text-blue-700">👤 Your Profile</h2>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-gray-700 text-sm">
+              <div><strong>Name:</strong> {userProfile.name}</div>
+              <div><strong>Age:</strong> {userProfile.age}</div>
+              <div><strong>Goal:</strong> {userProfile.goal}</div>
+              <div><strong>Diet:</strong> {userProfile.diet_type}</div>
+              <div><strong>Weight:</strong> {userProfile.weight_kg} kg</div>
+              <div><strong>Target Weight:</strong> {userProfile.target_weight} kg</div>
+              <div><strong>Tenure:</strong> {userProfile.tenure_months} months</div>
+              <div><strong>Activity Level:</strong> {userProfile.activity_level}</div>
+            </div>
+            <div className="mt-4 flex gap-4">
+              <button
+                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 shadow"
+                onClick={handleGeneratePlan}
+                disabled={generating}
+              >
+                {generating ? "Generating..." : `Generate Month ${plans.length + 1}`}
+              </button>
+              <button
+                className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 shadow"
+                onClick={logout}
+              >
+                Log out
+              </button>
+            </div>
+            {error && <div className="mt-2 text-red-600 font-semibold">{error}</div>}
           </div>
-          <iframe
-            src={pdfUrl}
-            title="Meal Plan PDF Preview"
-            width="100%"
-            height="600px"
-            className="border rounded"
-          />
-        </div>
-      )}
-    </div>
+        )}
+
+        {plans.map((month) => (
+          <div key={month.month} className="mb-6">
+            <h3
+              className="text-xl font-semibold text-gray-800 bg-yellow-200 px-4 py-2 rounded cursor-pointer"
+              onClick={() => setSelectedMonth(month.month === selectedMonth ? null : month.month)}
+            >
+              📅 Month {month.month}
+            </h3>
+            {selectedMonth === month.month && (
+              <div className="mt-2">
+                {month.weeks.map((week) => (
+                  <div key={week.week_number} className="mb-4">
+                    <button
+                      className="w-full text-left bg-gray-200 px-4 py-2 rounded hover:bg-gray-300 font-medium"
+                      onClick={() => setSelectedWeek(week.week_number === selectedWeek ? null : week.week_number)}
+                    >
+                      Week {week.week_number}
+                    </button>
+                    {selectedWeek === week.week_number && (
+                      <div className="bg-white border border-gray-300 p-4 rounded mt-2 whitespace-pre-wrap text-sm">
+                        {week.response}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </main>
   );
 }
